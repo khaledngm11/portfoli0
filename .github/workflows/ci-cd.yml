@@ -20,5 +20,5 @@ jobs:
 
       - name: Deploy to Kubernetes
         run: |
-          kubectl set image deployment/portfolio portfolio=112000/devops-demo:${{ github.sha }} -n public
+          kubectl set image deployment/portfolio portfolio=112000/portfolio:${{ github.sha }} -n public
           kubectl rollout status deployment/portfolio -n public --timeout=120s
