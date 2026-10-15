@@ -1,0 +1,24 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to Docker Hub
+        run: echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+
+      - name: Build and push image
+        run: |
+          docker build -t 112000/portfolio:${{ github.sha }} .
+          docker push 112000/portfolio:${{ github.sha }}
+
+      - name: Deploy to Kubernetes
+        run: |
+          kubectl set image deployment/portfolio portfolio=112000/devops-demo:${{ github.sha }} -n public
+          kubectl rollout status deployment/portfolio -n public --timeout=120s
