@@ -1,0 +1,90 @@
+
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-deploy-test:
+    runs-on: self-hosted
+
+    outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to Docker Hub
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          printf '%s' "$DOCKERHUB_TOKEN" |
+            docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+
+      - name: Set image tag
+        id: meta
+        run: echo "image_tag=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push image
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t 112000/portfolio:$IMAGE_TAG .
+          docker push 112000/portfolio:$IMAGE_TAG
+
+      - name: Deploy to Test
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          kubectl set image deployment/portfolio \
+            portfolio=112000/portfolio:$IMAGE_TAG \
+            -n test
+
+          kubectl rollout status deployment/portfolio \
+            -n test --timeout=120s
+
+      - name: Verify Test Image
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          ACTUAL=$(kubectl get deployment portfolio -n test \
+            -o jsonpath='{.spec.template.spec.containers[?(@.name=="portfolio")].image}')
+
+          EXPECTED="112000/portfolio:$IMAGE_TAG"
+
+          test "$ACTUAL" = "$EXPECTED"
+
+  deploy-production:
+    needs: build-and-deploy-test
+    runs-on: self-hosted
+
+    environment:
+      name: production
+
+    steps:
+      - name: Deploy approved image to Production
+        env:
+          IMAGE_TAG: ${{ needs.build-and-deploy-test.outputs.image_tag }}
+        run: |
+          kubectl set image deployment/portfolio \
+            portfolio=112000/portfolio:$IMAGE_TAG \
+            -n production
+
+          kubectl rollout status deployment/portfolio \
+            -n production --timeout=120s
+
+      - name: Verify Production Image
+        env:
+          IMAGE_TAG: ${{ needs.build-and-deploy-test.outputs.image_tag }}
+        run: |
+          ACTUAL=$(kubectl get deployment portfolio -n production \
+            -o jsonpath='{.spec.template.spec.containers[?(@.name=="portfolio")].image}')
+
+          EXPECTED="112000/portfolio:$IMAGE_TAG"
+
+          test "$ACTUAL" = "$EXPECTED"

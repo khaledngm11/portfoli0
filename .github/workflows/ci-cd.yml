@@ -1,4 +1,3 @@
-
 name: CI/CD
 
 on:
@@ -9,7 +8,62 @@ permissions:
   contents: read
 
 jobs:
+  # ---------------------------------------------------------------
+  # 1) Gitleaks - secrets scanning (full git history)
+  # ---------------------------------------------------------------
+  gitleaks:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        run: |
+          docker run --rm \
+            -v "$PWD:/repo" \
+            ghcr.io/gitleaks/gitleaks:v8.21.2 \
+            detect --source /repo --redact --verbose --exit-code 1
+
+  # ---------------------------------------------------------------
+  # 2) Semgrep - SAST
+  # ---------------------------------------------------------------
+  semgrep:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Semgrep
+        run: |
+          docker run --rm \
+            -v "$PWD:/src" -w /src \
+            semgrep/semgrep:latest \
+            semgrep scan --config p/default --metrics=off --error
+
+  # ---------------------------------------------------------------
+  # 3) Trivy - filesystem scan (deps, IaC misconfig, secrets)
+  # ---------------------------------------------------------------
+  trivy-fs:
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Trivy filesystem scan
+        run: |
+          docker run --rm \
+            -v "$PWD:/src" \
+            aquasec/trivy:0.58.1 \
+            fs /src \
+            --scanners vuln,misconfig,secret \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            --exit-code 1
+
+  # ---------------------------------------------------------------
+  # 4) Build -> Trivy image scan -> Push -> Deploy to Test
+  # ---------------------------------------------------------------
   build-and-deploy-test:
+    needs: [gitleaks, semgrep, trivy-fs]
     runs-on: self-hosted
 
     outputs:
@@ -30,12 +84,27 @@ jobs:
         id: meta
         run: echo "image_tag=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
 
-      - name: Build and push image
+      - name: Build image
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+        run: docker build -t 112000/portfolio:$IMAGE_TAG .
+
+      - name: Trivy image scan (before push)
         env:
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker build -t 112000/portfolio:$IMAGE_TAG .
-          docker push 112000/portfolio:$IMAGE_TAG
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:0.58.1 \
+            image 112000/portfolio:$IMAGE_TAG \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            --exit-code 1
+
+      - name: Push image
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+        run: docker push 112000/portfolio:$IMAGE_TAG
 
       - name: Deploy to Test
         env:
@@ -59,6 +128,9 @@ jobs:
 
           test "$ACTUAL" = "$EXPECTED"
 
+  # ---------------------------------------------------------------
+  # 5) Production (manual approval via environment)
+  # ---------------------------------------------------------------
   deploy-production:
     needs: build-and-deploy-test
     runs-on: self-hosted
